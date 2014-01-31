@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <climits>
+#include <cmath>
 
 using namespace std;
 
@@ -34,12 +35,16 @@ const bool REPTS = false; // false = sin repeticiones, true = con repeticiones.
 const int MAX_CODESPACE_DIMENTION = 46656; // 6^6 = 46656
 
 // #### other typedef declarations ####
+typedef bool tMascaraPistas[MAX_CHIPS];
 typedef enum tColores { Rojo, Azul, Verde, Negro, Granate, Marron };
 typedef tColores tCodigo[MAX_CHIPS];
 typedef enum tStatus { good, cancel, help, length_err, key_err, rept_err, hint };
 typedef enum tBreakerInteractionMode {RandomKey, GivenKey, AskingForCorrection};
 typedef unsigned tScore[USER_FILE_COLS - 1];
 typedef bool tCodeSpace[MAX_CODESPACE_DIMENTION];
+// El siguiente tipo representa la cantidad de códigos que podrian ser la clave
+// tras cada una de las posibles respuestas.
+typedef usi tResponseSpace[MAX_CHIPS][MAX_CHIPS];
 
 typedef struct {
 	usi chips;
@@ -51,6 +56,11 @@ typedef struct {
 	tBreakerInteractionMode breakerInteraction;
 	tCodigo aux; // Usado por breakerGuessing(tConfig&, tCodigo). Inicializado a RRRRRR
 } tConfig;
+
+typedef struct {
+	usi correct;
+	usi semicorrect;
+} tCorreccion;
 
 // #### Prototypes ####
 void pause();
@@ -71,23 +81,35 @@ bool displayTXTFileWCentinel(string fileName, string centinel);
 
 usi getDimention(const tCodeSpace& codeSpace);
 void initCodeSpace(tCodeSpace& codeSpace, const tConfig& config);
+usi getReduccionDeCodeSpace(const tConfig& config, const tCodeSpace& codeSpace, tCodigo guess, usi correct, usi semicorrect);
+void reducirCodeSpace(const tConfig& config, tCodeSpace& codeSpace, tCodigo guess, usi correct, usi semicorrect);
+void getFirstCode(const tCodeSpace& codeSpace, tCodigo code);
+
+usi getMax(const tResponseSpace& responseSpace, const tConfig& config);
+void initResponseSpace(tResponseSpace& responseSpace);
 
 void genRndKey(tCodigo key, const tConfig& config);
 void printKey(tCodigo key, const tConfig& config);
+
+tCorreccion breakerGuessing(tConfig& config, tCodigo guess);
+void breakerGiveUp(tConfig& config, tCodigo& key);
+usi playBreakerGame(tConfig& config);
 
 usi digitsToNumber(usi i, usi j, usi k, usi l, usi m, usi n);
 
 char toColorId(tColores color);
 tColores toColor(char id);
+tColores toColor(int id);
 string colorToColorName(tColores color);
 void totCodigo(string input, tCodigo code, const tConfig& config);
 bool correctKeys(string input, const tConfig& config);
-tStatus readCode(tCodigo code, const tConfig& config);
+tStatus readCode(tCodigo code, const tConfig& config, bool prompt = true);
 bool calcPerformance(tCodigo code, tCodigo key, usi &correct_keys, usi &disordered_keys, const tConfig& config);
 void printPerformanceMsg(tCodigo code, tCodigo key, usi tries, usi score, const tConfig& config);
 void printHint(tCodigo key, const tConfig& config);
 void manageStatus(tStatus status, const tConfig& config);
 usi calcScore(usi score, usi correct_keys, usi disordered_keys, bool won);
+usi calcScore(tConfig config, usi score, tCodeSpace& codespace, tCodigo guess, usi correct_keys, usi disordered_keys, bool won);
 usi playMastermind(string user, const tConfig& config);
 
 string getUserName();
@@ -111,22 +133,13 @@ int main() {
 	config.repts = REPTS; // false = sin repeticiones, true = con repeticiones.
 	
 	config.breakerInteraction = RandomKey;
-	totCodigo("RRRRRR", config.aux,  config);
-	
-	// TDD
-		tCodeSpace codespace;
-		initCodeSpace(codespace, config);
-		cout << getDimention(codespace) << endl;
-		config.repts = true;
-		initCodeSpace(codespace, config);
-		cout << getDimention(codespace) << endl;
-		config.chips = 6;
-		initCodeSpace(codespace, config);
-		cout << getDimention(codespace) << endl;
-		config.repts = false;
-		initCodeSpace(codespace, config);
-		cout << getDimention(codespace) << endl;
-	
+	config.aux[0] = Rojo;
+	config.aux[1] = Rojo;
+	config.aux[2] = Rojo;
+	config.aux[3] = Rojo;
+	config.aux[4] = Rojo;
+	config.aux[5] = Rojo;
+
 	// Solicitar el nombre del jugador:
 	string user = getUserName();
 	cout << "¡Hola " << user << "! Elige una opción..." << endl;
@@ -148,10 +161,10 @@ int main() {
 			case 4: // Cambiar configuración.
 				changeConfig(config);
 				break;
-			case 5:
-			
+			case 5: // Rompedor automático
+				playBreakerGame(config);
 				break;
-			case 6:
+			case 6: // Configurar el rompedor automático
 				changeBreakerConfig(config);
 				break;
 		}
@@ -186,6 +199,7 @@ int readInt(string ERR_MSG, int m, int n) {
 	cin >> input;
 	while (cin.fail() || input < m || input > n) {
 		cin.clear(); cin.sync(); // Restablecer flujo, descartar más entrada.
+		cin.ignore(INT_MAX, '\n');
 		cout << ERR_MSG;
 		cin >> input;
 	}
@@ -240,15 +254,44 @@ usi breakerConfigMenu() {
 	cout << endl << endl;
 	cout << "1 - Origen de la clave." << endl;
 	cout << "2 - Modo interactivo." << endl;
-	cout << "0 - Salir." << endl;
+	cout << "0 - Volver al menú principal." << endl;
 	cout << "Opción: ";
 	return (usi)readInt("Opción no valida. Opción: ", 0, 2);
 }
 
 /** Realiza cambios en la configuracion del rompedor automático. **/
 void changeBreakerConfig(tConfig& config) {
+	usi opt = breakerConfigMenu();
+	while (opt != 0) {
+		cout << endl;
+		switch (opt) {
+		case 1: // Cambiar número de fichas.
+			cout << "- Origen de la clave. -" << endl << endl;
+			if (readBool("", "aleatorio", "usuario")) {
+				config.breakerInteraction = RandomKey;
+			} else {
+				if (config.breakerInteraction == RandomKey)
+					config.breakerInteraction = GivenKey;
+			}			
+			cout << SAVE_CONFIG_PROMPT << endl << endl;
+			break;
+		case 2: // Cambiar la interactividad.
+			if (config.breakerInteraction == RandomKey) {
+				cout << "Para activar/desactivar el modo interactivo, el origen de la clave debe ser el usuario." << endl;
+			} else {
+				cout << "- Activar/desactivar el modo interactivo. -" << endl << endl;
+				config.breakerInteraction = readBool("", "activar", "desactivar") ? AskingForCorrection : GivenKey;
+				cout << SAVE_CONFIG_PROMPT << endl << endl;
+			}
+			break;
+		case 0: // Volver al menú principal.
+			cout << "- Volver al menú principal. -" << endl << endl;
+			break;
+		}
 
-
+		// Mostrar el menú y leer otra opción:
+		opt = breakerConfigMenu();
+	}
 }
 
 /** Muestra el menú de configuración y devuelve un usi representando la selección del usuario. **/
@@ -320,6 +363,17 @@ void displayConfig(const tConfig& config) {
 	cout << "Número máximo de pistas: " << config.max_hints << "." << endl;
 	cout << "Número mínimo de intentos entre pistas: " << config.min_tries_btw_hints << "." << endl;
 	cout << "Modo de juego: códigos " << (config.repts ? "con" : "sin") << " repeticiones." << endl;
+	cout << "Modo de interacción del rompedor: ";
+	switch(config.breakerInteraction) {
+		case RandomKey:
+			cout << "clave aleatoria." << endl;
+			break;
+		case GivenKey:
+			cout << "clave proporcionada por el usuario." << endl;
+			break;
+		case AskingForCorrection:
+			cout << "aciertos y semiaciertos proporcionados por el usuario." << endl;
+	}
 }
 
 /** Muestra en consola los contenidos del archivo de texto fileName, desde la línea i hasta la j (inclusive).
@@ -414,6 +468,105 @@ void initCodeSpace(tCodeSpace& codeSpace, const tConfig& config) {
 	}
 }
 
+/** Retorna el numero de códigos invalidados por un intento dado. **/
+usi getReduccionDeCodeSpace(const tConfig& config, const tCodeSpace& codeSpace, tCodigo guess, usi correct, usi semicorrect) {
+	usi result = 0;
+	usi aux1, aux2;
+	tCodigo buf;
+	int I = 1, J = 1, K = 1, L = 1, M = 1, N = 1;
+	int i, j, k, l, m, n;
+	switch(config.chips) {
+		case 6:
+			I = 6;
+		case 5:
+			J = 6;
+		case 4:
+			K = 6;
+		case 3:
+			L = 6;
+		case 2:
+			M = 6;
+		case 1:
+			N = 6;
+	}
+	for(i = 0; i < I; i++)
+	for(j = 0; j < J; j++)
+	for(k = 0; k < K; k++)
+	for(l = 0; l < L; l++)
+	for(m = 0; m < M; m++)
+	for(n = 0; n < N; n++) {
+		if (codeSpace[digitsToNumber(i,j,k,l,m,n)]) {
+			buf[0] = toColor(n); buf[1] = toColor(m); buf[2] = toColor(l);
+			buf[3] = toColor(k); buf[4] = toColor(j); buf[5] = toColor(i);
+			calcPerformance(guess, buf, aux1, aux2, config);
+			if (aux1 != correct || aux2 != semicorrect) result++;
+		}
+	}
+	return result;
+}
+
+/** Invalida los códigos que no sean consistentes con el último intento. **/
+void reducirCodeSpace(const tConfig& config, tCodeSpace& codeSpace, tCodigo guess, usi correct, usi semicorrect) {
+	usi aux1, aux2;
+	tCodigo buf;
+	int I = 1, J = 1, K = 1, L = 1, M = 1, N = 1;
+	int i, j, k, l, m, n;
+	switch(config.chips) {
+		case 6:
+			I = 6;
+		case 5:
+			J = 6;
+		case 4:
+			K = 6;
+		case 3:
+			L = 6;
+		case 2:
+			M = 6;
+		case 1:
+			N = 6;
+	}
+	for(i = 0; i < I; i++)
+	for(j = 0; j < J; j++)
+	for(k = 0; k < K; k++)
+	for(l = 0; l < L; l++)
+	for(m = 0; m < M; m++)
+	for(n = 0; n < N; n++) {
+		if (codeSpace[digitsToNumber(i,j,k,l,m,n)]) {
+			buf[0] = toColor(n); buf[1] = toColor(m); buf[2] = toColor(l);
+			buf[3] = toColor(k); buf[4] = toColor(j); buf[5] = toColor(i);
+			calcPerformance(guess, buf, aux1, aux2, config);
+			codeSpace[digitsToNumber(i,j,k,l,m,n)] = (aux1 == correct && aux2 == semicorrect);
+		}
+	}
+}
+
+/** Retorna el primer código del espacio de codigos **/
+void getFirstCode(const tCodeSpace& codeSpace, tCodigo code) {
+	int i;
+	for (i = 0; !codeSpace[i]; i++);
+	code[0] = toColor(i % 6);  code[1] = toColor((i/6) % 6);  code[2] = toColor((i/(6*6)) % 6);
+	code[3] = toColor((i/(6*6*6)) % 6);  code[4] = toColor((i/(6*6*6*6)) % 6);  code[5] = toColor((i/(6*6*6*6*6)) % 6);
+}
+
+/** Retorna la maxima dimension de entre todas las de los espacios de codigos asociados a algun espacio de respuestas **/
+usi getMax(const tResponseSpace& responseSpace, const tConfig& config) {
+	usi result = 0;
+	for (int i = 0; i < config.chips - 1; i++) {
+		for (int j = 0; i+j <= config.chips; j++) {
+			if (responseSpace[i][j] > result) result = responseSpace[i][j];
+		}
+	}
+	if (responseSpace[config.chips - 1][0] > result) result = responseSpace[config.chips - 1][0];
+	return result;
+}
+
+/** Inicializa a 0 **/
+void initResponseSpace(tResponseSpace& responseSpace) {
+	for (int i = 0; i < MAX_CHIPS; i++)
+		for (int j = 0; j < MAX_CHIPS; j++)
+			responseSpace[i][j] = 0;
+}
+
 /** Genera una clave de Mastermind en key de chips longitud, admitiendo o no repeticiones dependiendo del valor de repts. **/
 void genRndKey(tCodigo key, const tConfig& config) {
 	bool chart[COLORS];
@@ -440,6 +593,90 @@ void genRndKey(tCodigo key, const tConfig& config) {
 		key[i] = (tColores)rnd; // Convertir y añadir a la clave.
 	}
 
+}
+
+/** Retorna la respuesta ante un intento del rompedor.
+ ** Su finalidad es separar la parte del rompedor que conoce la clave
+ ** de la parte que trata de adivinarlo. **/
+tCorreccion breakerGuessing(tConfig& config, tCodigo guess) {
+	tCorreccion gonda;
+	usi correct, semicorrect;
+	bool flag = false;
+	switch(config.breakerInteraction) {
+		case RandomKey:
+			while (config.aux[0] == Rojo && config.aux[1] == Rojo && config.aux[2] == Rojo &&
+				config.aux[3] == Rojo && config.aux[4] == Rojo && config.aux[5] == Rojo) {
+				genRndKey(config.aux, config);
+				cout << "******* El rompedor no lo sabe, pero la clave es: ********" << endl;
+				printKey(config.aux, config); cout << endl;
+				cout << "**********************************************************" << endl;
+			}
+			calcPerformance(guess, config.aux, correct, semicorrect, config);		
+			break;
+		case GivenKey:
+			while ((config.aux[0] == Rojo && config.aux[1] == Rojo && config.aux[2] == Rojo &&
+				   config.aux[3] == Rojo && config.aux[4] == Rojo && config.aux[5] == Rojo) || flag) {
+				   		cout << "Introduzca un código para que el rompedor lo acierte: ";
+				   		flag = (readCode(config.aux, config, false) != good);
+			}
+			calcPerformance(guess, config.aux, correct, semicorrect, config);
+			break;
+		case AskingForCorrection:
+			printKey(guess, config);
+			cout << "?" << endl;
+			cout << "Número de aciertos: ";
+			correct = readInt("No puede haber mas aciertos que fichas. Número de aciertos: ", 0, config.chips);
+			cout << "Número de semi-aciertos: ";
+			semicorrect = readInt("No puede haber tantos semi-aciertos. Número de semi-aciertos: ", 0, config.chips - correct);
+		
+	}
+	if (correct == config.chips) {
+		config.aux[0] = Rojo;
+		config.aux[1] = Rojo;
+		config.aux[2] = Rojo;
+		config.aux[3] = Rojo;
+		config.aux[4] = Rojo;
+		config.aux[5] = Rojo;
+	}
+	gonda.correct = correct;
+	gonda.semicorrect = semicorrect;
+	return gonda;
+}
+
+
+/** Retorna la clave en el caso de que el rompedor se rinda.
+ ** Su finalidad es separar la parte del rompedor que conoce la clave
+ ** de la parte que trata de adivinarlo. **/
+void breakerGiveUp(tConfig& config, tCodigo& key){
+	for (int i = 0; i < MAX_CHIPS; i++) {
+		key[i] = config.aux[i];
+		config.aux[i] = Rojo;
+	}
+}
+
+/** Inicia una partida de rompedor de acuerdo a la configuracion dada.
+	Retorna el número de intentos empleados **/
+usi playBreakerGame(tConfig& config) {
+	bool won = false;
+	tCodigo code; tCorreccion correccion;
+	tCodeSpace codespace; initCodeSpace(codespace, config);
+	int i;
+	for (i = 0; i < config.max_tries && !won; i++) {
+		getFirstCode(codespace, code);
+		correccion = breakerGuessing(config, code);
+		cout << i+1 << ": "; printKey(code, config); cout << endl;
+	    reducirCodeSpace(config, codespace,code, correccion.correct, correccion.semicorrect);
+		won = (correccion.correct == config.chips);
+		if (getDimention(codespace) == 0) {
+			cout << "Las respuestas son contradictorias." << endl;
+			i = config.max_tries;
+		}
+	}
+	if(i >= config.max_tries && !won) {
+		i++; breakerGiveUp(config, code);
+		cout << "El rompedor no ha conseguido adivinar la clave." << endl;
+	}
+	return i;
 }
 
 /** Imprime los identificadores de key a consola, separados por un espacio. **/
@@ -500,6 +737,24 @@ tColores toColor(char id) {
 	}
 }
 
+tColores toColor(int id) {
+	if (id == 0) {
+		return Rojo;
+	} else if (id == 1) {
+		return Azul;
+	} else if (id == 2) {
+		return Verde;
+	} else if (id == 3) {
+		return Negro;
+	} else if (id == 4) {
+		return Granate;
+	} else if (id == 5) {
+		return Marron;
+	} else {
+		return Rojo;
+	}
+}
+
 /** Devuelve el string del color asociado a color. **/
 string colorToColorName(tColores color) {
 	if (color == Rojo) {
@@ -537,8 +792,8 @@ bool correctKeys(string input, const tConfig& config) {
 }
 
 /** Pide y lee un código del usuario. Devuelve un estado y copia el código a code si es del tipo correcto. **/
-tStatus readCode(tCodigo code, const tConfig& config) {
-	cout << PROMPT;
+tStatus readCode(tCodigo code, const tConfig& config, bool prompt) {
+	if (prompt) cout << PROMPT;
 	string input;
 	getline(cin, input);
 	if (input == "0") {
@@ -584,7 +839,7 @@ tStatus readCode(tCodigo code, const tConfig& config) {
  ** Devuelve true si code y key son idénticos, false en caso contrario. **/
 bool calcPerformance(tCodigo code, tCodigo key, usi &correct_keys, usi &disordered_keys, const tConfig& config) {
 	bool chart[MAX_CHIPS]; // El tamaño debe ser constante. Que sea el máximo.
-
+	correct_keys = 0; disordered_keys = 0;
 	// Inicializar todas las entradas de chart a false.
 	for (usi i = 0; i <= config.chips - 1; i++) {
 		chart[i] = false;
@@ -645,6 +900,19 @@ void printHint(tCodigo key, const tConfig& config) {
 
 }
 
+/** Imprime en la consola una pista acerca de la clave. Esta implementacion no repite
+ ** pistas. **/
+void printHint(tCodigo key, const tConfig& config, tMascaraPistas mascara) {
+
+	// Generar un número aleatorio entre 0 y chips - 1 inclusive:
+	usi rnd = rand() % config.chips;
+	while (mascara[rnd]) rnd = rand() % config.chips;
+	mascara[rnd] = true;
+	// Imprimir pista:
+	cout << "El color en la posición " << rnd + 1 << " es: " << colorToColorName(key[rnd]) << ".";
+
+}
+
 /** Imprime el mensaje correspondiente al estado status. No se contemplan los status good ni hint. **/
 void manageStatus(tStatus status, const tConfig& config) {
 	switch (status) {
@@ -677,7 +945,19 @@ void manageStatus(tStatus status, const tConfig& config) {
 
 /** Calcula la puntuación agregada de un jugador. **/
 usi calcScore(usi score, usi correct_keys, usi disordered_keys, bool won) {
-	return score += disordered_keys + 5 * correct_keys + (won ? 100 : 0);
+	return score += correct_keys + 5 * disordered_keys + (won ? 100 : 0);
+}
+
+/** Este sistema de puntuacion suma puntos en funcion de la proporcion de codigos posibles antes y despues de
+ ** cada intento. Ademas, penaliza cada intento que no reduzca el espacio de codigos **/
+usi calcScore(tConfig config, usi score, tCodeSpace& codespace, tCodigo guess, usi correct_keys, usi disordered_keys, bool won) {
+	usi result = score;
+	usi reduccion = getReduccionDeCodeSpace(config, codespace, guess, correct_keys, disordered_keys);
+	if (reduccion == 0) result = restaPositiva(result, 50);
+	else result += (usi) floor(reduccion*20.0/getDimention(codespace));
+	if (won) result += 100;
+    reducirCodeSpace(config, codespace, guess, correct_keys, disordered_keys);
+    return result;
 }
 
 /** Conduce el desarrollo de una partida de Mastermind. Devuelve el número de intentos empleados
@@ -686,12 +966,19 @@ usi calcScore(usi score, usi correct_keys, usi disordered_keys, bool won) {
 usi playMastermind(string user, const tConfig& config) {
 	cout << "--- NUEVA PARTIDA ---" << endl << endl;
 	tCodigo key;
+	tMascaraPistas mascara;
+	for (int i = 0; i < MAX_CHIPS; i++) mascara[i] = false;
 	genRndKey(key, config);
 	// **************** <DEBUG> ****************
-	//cout << "La clave es: ";
-	//printKey(key, config);
-	//cout << endl;
+	cout << "La clave es: ";
+	printKey(key, config);
+	cout << endl;
 	// **************** </DEBUG> ****************
+	
+	//Espacio de codigos para calcular la puntuacion
+	tCodeSpace codespace;
+	initCodeSpace(codespace, config);
+	
 	tStatus status;
 	tCodigo code;
 	unsigned score = 0;
@@ -713,7 +1000,7 @@ usi playMastermind(string user, const tConfig& config) {
 			// Calcular intentos, aciertos, puntuación e imprimir mensaje de rendimiento.
 			tries++;
 			won = calcPerformance(code, key, correct_keys, disordered_keys, config);
-			score = calcScore(score, correct_keys, disordered_keys, won);
+			score = calcScore(config, score, codespace, code, correct_keys, disordered_keys, won);
 			printPerformanceMsg(code, correct_keys, disordered_keys, tries, score, config);
 		} else if (status == hint) {
 			if (tries == 0) {
@@ -726,7 +1013,7 @@ usi playMastermind(string user, const tConfig& config) {
 			} else { // Se satisfacen los requisitos para solicitar una pista.
 				lastHint = tries;
 				hints++;
-				printHint(key, config);
+				printHint(key, config, mascara);
 			}
 			cout << endl;
 		} else { // El código leído no era correcto, o se seleccionó la opción de ayuda o la de salir. Imprimir el mensaje que corresponda.
