@@ -31,12 +31,15 @@ const string HELP_FILE = "ayuda.txt", USER_FILE = "usuarios.txt", CENTINEL = "xx
 const usi CHIPS = 4, MAX_CHIPS = 6, MAX_TRIES = 30, COLORS = 6, MAX_HINTS = 2, MIN_TRIES_BTW_HINTS = 5, USER_FILE_COLS = 4, MAX_USER_LENGTH = 20;
 unsigned MAX_SCORE = 999999999;
 const bool REPTS = false; // false = sin repeticiones, true = con repeticiones.
+const int MAX_CODESPACE_DIMENTION = 46656; // 6^6 = 46656
 
 // #### other typedef declarations ####
 typedef enum tColores { Rojo, Azul, Verde, Negro, Granate, Marron };
 typedef tColores tCodigo[MAX_CHIPS];
 typedef enum tStatus { good, cancel, help, length_err, key_err, rept_err, hint };
+typedef enum tBreakerInteractionMode {RandomKey, GivenKey, AskingForCorrection};
 typedef unsigned tScore[USER_FILE_COLS - 1];
+typedef bool tCodeSpace[MAX_CODESPACE_DIMENTION];
 
 typedef struct {
 	usi chips;
@@ -44,6 +47,9 @@ typedef struct {
 	usi max_hints;
 	usi min_tries_btw_hints;
 	bool repts;
+	// Rompedor automatico
+	tBreakerInteractionMode breakerInteraction;
+	tCodigo aux; // Usado por breakerGuessing(tConfig&, tCodigo). Inicializado a RRRRRR
 } tConfig;
 
 // #### Prototypes ####
@@ -52,15 +58,24 @@ void chcp1252();
 
 int readInt(string ERR_MSG = INVALID_TYPE, int m = INT_MIN, int n = INT_MAX);
 bool readBool(string prompt, string opt1, string opt2);
+usi restaPositiva(usi minuendo, usi sustraendo);
+
 usi menu();
 usi configMenu();
 void changeConfig(tConfig& config);
 void displayConfig(const tConfig& config);
+usi breakerConfigMenu();
+void changeBreakerConfig(tConfig& config);
 bool displayTXTFile(string fileName, unsigned int i = 1, unsigned int j = INT_MAX);
 bool displayTXTFileWCentinel(string fileName, string centinel);
 
+usi getDimention(const tCodeSpace& codeSpace);
+void initCodeSpace(tCodeSpace& codeSpace, const tConfig& config);
+
 void genRndKey(tCodigo key, const tConfig& config);
 void printKey(tCodigo key, const tConfig& config);
+
+usi digitsToNumber(usi i, usi j, usi k, usi l, usi m, usi n);
 
 char toColorId(tColores color);
 tColores toColor(char id);
@@ -94,7 +109,24 @@ int main() {
 	config.max_hints = MAX_HINTS;
 	config.min_tries_btw_hints = MIN_TRIES_BTW_HINTS;
 	config.repts = REPTS; // false = sin repeticiones, true = con repeticiones.
-
+	
+	config.breakerInteraction = RandomKey;
+	totCodigo("RRRRRR", config.aux,  config);
+	
+	// TDD
+		tCodeSpace codespace;
+		initCodeSpace(codespace, config);
+		cout << getDimention(codespace) << endl;
+		config.repts = true;
+		initCodeSpace(codespace, config);
+		cout << getDimention(codespace) << endl;
+		config.chips = 6;
+		initCodeSpace(codespace, config);
+		cout << getDimention(codespace) << endl;
+		config.repts = false;
+		initCodeSpace(codespace, config);
+		cout << getDimention(codespace) << endl;
+	
 	// Solicitar el nombre del jugador:
 	string user = getUserName();
 	cout << "¡Hola " << user << "! Elige una opción..." << endl;
@@ -115,6 +147,12 @@ int main() {
 				break;
 			case 4: // Cambiar configuración.
 				changeConfig(config);
+				break;
+			case 5:
+			
+				break;
+			case 6:
+				changeBreakerConfig(config);
 				break;
 		}
 		
@@ -174,6 +212,11 @@ bool readBool(string prompt, string opt1, string opt2) {
 	if (i == opt1) return true; else return false;
 }
 
+/** Retorna el máximo entre minuendo - sustraendo y 0 **/
+usi restaPositiva(usi minuendo, usi sustraendo) {
+	return minuendo - sustraendo > 0 ? minuendo - sustraendo : 0;
+}
+
 /** Muestra el menú y devuelve un usi representando la selección del usuario. **/
 usi menu() {
 	cout << endl;
@@ -183,9 +226,29 @@ usi menu() {
 	cout << "2 - Puntuaciones." << endl;
 	cout << "3 - Mostrar configuración." << endl;
 	cout << "4 - Cambiar configuración." << endl;
+	cout << "5 - Rompedor automático." << endl;
+	cout << "6 - Configurar rompedor automático." << endl;
 	cout << "0 - Salir." << endl;
 	cout << "Opción: ";
-	return (usi)readInt("Opción no valida. Opción: ", 0, 4);
+	return (usi)readInt("Opción no valida. Opción: ", 0, 6);
+}
+
+/** Muestra el menú de configuracion del rompedor automático. **/
+usi breakerConfigMenu() {
+	cout << endl;
+	cout << "--- MENÚ DEL ROMPEDOR AUTOMÁTICO ---";
+	cout << endl << endl;
+	cout << "1 - Origen de la clave." << endl;
+	cout << "2 - Modo interactivo." << endl;
+	cout << "0 - Salir." << endl;
+	cout << "Opción: ";
+	return (usi)readInt("Opción no valida. Opción: ", 0, 2);
+}
+
+/** Realiza cambios en la configuracion del rompedor automático. **/
+void changeBreakerConfig(tConfig& config) {
+
+
 }
 
 /** Muestra el menú de configuración y devuelve un usi representando la selección del usuario. **/
@@ -304,6 +367,53 @@ bool displayTXTFileWCentinel(string fileName, string centinel) {
 	}
 }
 
+/** Retorna el número de códigos validos en cierto momento **/
+usi getDimention(const tCodeSpace& codeSpace) {
+	usi result = 0;
+	for (int i = 0; i < MAX_CODESPACE_DIMENTION; i++)
+		if (codeSpace[i]) result++;
+	return result;
+}
+
+/** Inicializa el espacio de códigos con todos los códigos válidos en funcion
+ ** de la configuración. **/
+void initCodeSpace(tCodeSpace& codeSpace, const tConfig& config) {
+	for (int i = 0; i < MAX_CODESPACE_DIMENTION; i++) codeSpace[i] = false;
+	int I = 1, J = 1, K = 1, L = 1, M = 1, N = 1;
+	int i, j, k, l, m, n;
+	switch(config.chips) {
+		case 6:
+			I = 6;
+		case 5:
+			J = 6;
+		case 4:
+			K = 6;
+		case 3:
+			L = 6;
+		case 2:
+			M = 6;
+		case 1:
+			N = 6;
+	}
+	for(i = 0; i < I; i++)
+	for(j = 0; j < J; j++)
+	for(k = 0; k < K; k++)
+	for(l = 0; l < L; l++)
+	for(m = 0; m < M; m++)
+	for(n = 0; n < N; n++) {
+		if (config.repts) {
+			codeSpace[digitsToNumber(i,j,k,l,m,n)] = true;
+		} else {
+			codeSpace[digitsToNumber(i,j,k,l,m,n)] = 
+				(M == 1 || n != m) &&
+				(L == 1 || (n != l && m != l)) &&
+				(K == 1 || (n != k && m != k && l != k)) &&
+				(J == 1 || (n != j && m != j && l != j && k != j)) &&
+				(I == 1 || (n != i && m != i && l != i && k != i && j != i));
+		}
+	}
+}
+
 /** Genera una clave de Mastermind en key de chips longitud, admitiendo o no repeticiones dependiendo del valor de repts. **/
 void genRndKey(tCodigo key, const tConfig& config) {
 	bool chart[COLORS];
@@ -338,6 +448,11 @@ void printKey(tCodigo key, const tConfig& config) {
 		cout << toColorId(key[i]) << " ";
 	}
 	cout << toColorId(key[config.chips - 1]);
+}
+
+/** Retorna un entero sin signo codificado como 6 digitos en base 6. **/
+usi digitsToNumber(usi i, usi j, usi k, usi l, usi m, usi n) {
+	return n + 6*m + 6*6*l + 6*6*6*k + 6*6*6*6*j + 6*6*6*6*6*i;
 }
 
 /** Devuelve el identificador de color. **/
